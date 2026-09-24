@@ -1,0 +1,16 @@
+{
+  "name": "vue-shared-looseequal",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Trimmed snapshot of @vue/shared for a bug-fix task",
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "~6.0.3",
+    "vitest": "^4.1.11"
+  }
+}
