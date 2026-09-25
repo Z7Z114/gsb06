@@ -1,4 +1,4 @@
-import { looseEqual } from '../src'
+import { looseEqual, looseIndexOf } from '../src'
 
 describe('utils/looseEqual', () => {
   test('compares booleans correctly', () => {
@@ -284,5 +284,206 @@ describe('utils/looseEqual', () => {
     expect(looseEqual(new Set([1]), new Set([2]))).toBe(false)
     expect(looseEqual(new Set<any>([1, '1']), new Set<any>([1, 2]))).toBe(false)
     expect(looseEqual(new Set(), new Map())).toBe(false)
+  })
+})
+
+describe('utils/looseEqual circular references', () => {
+  // Builds two separate but structurally identical mutual-reference graphs:
+  // [n1 <-> n2] and [m1 <-> m2]
+  const makeGraph = () => {
+    const n1: any = { id: 1 }
+    const n2: any = { id: 2 }
+    n1.peer = n2
+    n2.peer = n1
+    return [n1, n2]
+  }
+
+  test('does not throw on circular graphs and compares isomorphic ones', () => {
+    // 1. mutual references embedded inside an array
+    expect(() => looseEqual(makeGraph(), makeGraph())).not.toThrow()
+    expect(looseEqual(makeGraph(), makeGraph())).toBe(true)
+
+    // 2. self-referencing object
+    const selfA: any = { id: 1 }
+    selfA.self = selfA
+    const selfB: any = { id: 1 }
+    selfB.self = selfB
+    expect(looseEqual(selfA, selfB)).toBe(true)
+
+    // 3. self-referencing Set
+    const setA = new Set<any>()
+    setA.add(1)
+    setA.add(setA)
+    const setB = new Set<any>()
+    setB.add(1)
+    setB.add(setB)
+    expect(looseEqual(setA, setB)).toBe(true)
+
+    // 4. circular array
+    const arrA: any[] = [1]
+    arrA.push(arrA)
+    const arrB: any[] = [1]
+    arrB.push(arrB)
+    expect(looseEqual(arrA, arrB)).toBe(true)
+
+    // 5. Map containing a circular value
+    const mapA = new Map<string, any>([['a', 1]])
+    mapA.set('self', mapA)
+    const mapB = new Map<string, any>([['a', 1]])
+    mapB.set('self', mapB)
+    expect(looseEqual(mapA, mapB)).toBe(true)
+
+    // 6. circular structure nested inside arrays / objects / collections
+    expect(looseEqual({ list: makeGraph() }, { list: makeGraph() })).toBe(true)
+    expect(
+      looseEqual(new Set([makeGraph()]), new Set([makeGraph()])),
+    ).toBe(true)
+    expect(
+      looseEqual(
+        new Map([['graph', makeGraph()]]),
+        new Map([['graph', makeGraph()]]),
+      ),
+    ).toBe(true)
+  })
+
+  test('handles cycles hundreds of levels deep', () => {
+    const makeChain = (length: number, tailTarget: number) => {
+      const nodes: any[] = []
+      for (let i = 0; i < length; i++) {
+        nodes.push({ id: i })
+      }
+      nodes.forEach((node, i) => {
+        node.next = nodes[(i + 1) % length]
+      })
+      // sanity: the tail points back into the chain, closing a cycle
+      expect(nodes[length - 1].next).toBe(nodes[tailTarget])
+      return nodes[0]
+    }
+    const depth = 200
+    expect(looseEqual(makeChain(depth, 0), makeChain(depth, 0))).toBe(true)
+    // cycles of different lengths must not match
+    expect(looseEqual(makeChain(depth, 0), makeChain(depth - 1, 0))).toBe(
+      false,
+    )
+  })
+
+  test('distinguishes a self loop from a two-node cycle', () => {
+    const self: any = { id: 1 }
+    self.next = self
+
+    const a: any = { id: 1 }
+    const b: any = { id: 1 }
+    a.next = b
+    b.next = a
+
+    expect(looseEqual(self, a)).toBe(false)
+    expect(looseEqual(a, self)).toBe(false)
+  })
+
+  test('rejects reverse / conflicting correspondences', () => {
+    // a pairs with b at the root, but a.peer closes back to a instead of b
+    const rootA: any = { id: 1 }
+    const rootB: any = { id: 1 }
+    const otherB: any = { id: 1 }
+    rootA.peer = rootA
+    rootB.peer = otherB
+    otherB.peer = rootB
+    expect(looseEqual(rootA, rootB)).toBe(false)
+    expect(looseEqual(rootB, rootA)).toBe(false)
+
+    // same cycle length but the corresponding nodes carry different leaves
+    const x1: any = { id: 1 }
+    const x2: any = { id: 2 }
+    x1.peer = x2
+    x2.peer = x1
+    const y1: any = { id: 1 }
+    const y2: any = { id: 99 }
+    y1.peer = y2
+    y2.peer = y1
+    expect(looseEqual(x1, y1)).toBe(false)
+    expect(looseEqual(y1, x1)).toBe(false)
+
+    // identical leaves but the extra key breaks structural equality
+    expect(looseEqual(makeGraph(), [...makeGraph(), 3])).toBe(false)
+  })
+
+  test('is symmetric for circular structures', () => {
+    const selfA: any = { id: 1 }
+    selfA.self = selfA
+    const selfB: any = { id: 1, other: true }
+    selfB.self = selfB
+
+    const cases: [any, any][] = [
+      [makeGraph(), makeGraph()],
+      [selfA, selfB],
+    ]
+    for (const [x, y] of cases) {
+      expect(looseEqual(x, y)).toBe(looseEqual(y, x))
+    }
+  })
+
+  test('keeps DAG (acyclic shared references) semantics', () => {
+    // shared references without a cycle must stay structurally equal
+    const shared = { v: 1 }
+    const dagA = { x: shared, y: shared }
+    const dagB = { x: { v: 1 }, y: { v: 1 } }
+    expect(looseEqual(dagA, dagB)).toBe(true)
+    expect(looseEqual(dagB, dagA)).toBe(true)
+
+    const dagC = { x: { v: 1 }, y: { v: 2 } }
+    expect(looseEqual(dagA, dagC)).toBe(false)
+  })
+
+  test('preserves existing semantics for containers holding cyclic members', () => {
+    const selfA: any = { id: 1 }
+    selfA.self = selfA
+    const selfB: any = { id: 2 }
+    selfB.self = selfB
+
+    // Set vs Map mismatch still wins even with cyclic content
+    const cyclicSet = new Set<any>([selfA])
+    const cyclicMap = new Map<any, any>([[selfA, 1]])
+    expect(looseEqual(cyclicSet, cyclicMap)).toBe(false)
+
+    // order-independent matching with a cyclic member present
+    expect(
+      looseEqual(new Set<any>([1, selfA]), new Set<any>([selfA, 1])),
+    ).toBe(true)
+    expect(
+      looseEqual(new Set<any>([1, selfA]), new Set<any>([2, selfA])),
+    ).toBe(false)
+
+    // Map key/value matching with a circular key
+    expect(
+      looseEqual(
+        new Map<any, any>([[selfA, 1]]),
+        new Map<any, any>([[selfB, 1]]),
+      ),
+    ).toBe(false)
+  })
+
+  test('is reentrant: state is cleaned up between calls', () => {
+    const g1 = makeGraph()
+    const g2 = makeGraph()
+    for (let i = 0; i < 50; i++) {
+      expect(looseEqual(g1, g2)).toBe(true)
+      expect(looseEqual(g2, g1)).toBe(true)
+      expect(looseEqual(g1, g1)).toBe(true)
+    }
+    // nested invocation from within a comparison must not see outer state:
+    // looseIndexOf compares several unrelated cyclic elements in one loop
+    const a: any = { id: 1 }
+    a.self = a
+    const b: any = { id: 2 }
+    b.self = b
+    const c: any = { id: 1 }
+    c.self = c
+    expect(looseIndexOf([b, c], a)).toBe(1)
+    expect(looseIndexOf([b, c], { id: 3 })).toBe(-1)
+  })
+
+  test('keeps the public signature unchanged', () => {
+    expect(looseEqual.length).toBe(2)
+    expect(looseIndexOf.length).toBe(2)
   })
 })
